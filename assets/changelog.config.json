@@ -1,0 +1,15 @@
+{
+  "_说明": "更新日志发布配置。复制本文件到你的项目根目录，改成本仓库的真实值。没有 token 时走 local_file 本地通道。",
+
+  "repo": "huaweicloud/aievspace-operation-guide",
+  "path": "AIDevspace.html",
+  "branch": "main",
+
+  "local_file": "D:/AI Shell/operation-guide/AIDevspace.html",
+
+  "view_base": "https://huaweicloud.github.io/aievspace-operation-guide/AIDevspace.html#changelog",
+
+  "site_name": "AI 开发者空间用户操作指南",
+
+  "_token_说明": "优先读环境变量 GITHUB_TOKEN；也可把 token 写在这里，但不推荐（会进版本库）。细粒度 token 需 Contents 读写；若仓库在你不属于的组织下，须用 Classic token + repo scope。"
+}
