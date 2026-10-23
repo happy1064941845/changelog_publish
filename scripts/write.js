@@ -7,10 +7,11 @@
  *   {
  *     "config": "changelog.config.json",     // 可选，默认读同目录/当前目录的 changelog.config.json
  *     "version": "v1.8.0",
- *     "date": "2026-10-21",
+ *     "date": "2026-10-23",
  *     "items": "特性更新|环境管理|自定义环境支持打包发布|完成的…",
  *     "overwrite": false,                    // 可选；版本号已存在时，true = 整块覆盖原块（位置不变）
- *     "dry_run": true
+ *     "preview_only": true,                  // 可选；只出预览文本、不碰任何文件
+ *     "dry_run": true                        // 可选；算好但不提交/不落盘
  *   }
  *   EOF
  *
@@ -23,31 +24,26 @@
  *
  * 幂等：页面已有同版本号 data-version 时默认拒写；overwrite=true 时整块替换该版本。
  *
- * 输出 JSON：{ ok, gate, channel, msg, size_before, size_after, mode, view_url, put_body?, local_path? }
+ * 预览：加 "preview_only": true 时只回预览文本（与 Coze 工作流 A 节点三逐字一致），不碰文件。
+ *
+ * ★ 解析/渲染规则全部来自同目录 lib.js —— 该文件是「更新日志渲染规则」的唯一定义源，
+ *   逐字对齐 Coze 的 coze-preview-node.js / coze-commit-node.js。改规则要三处一起改。
+ *
+ * 输出 JSON：{ ok, gate, channel, msg, preview, size_before, size_after, mode, view_url, put_body?, local_path? }
  */
 
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
+const lib = require('./lib.js');
 
 const START = '<!-- CHANGELOG:START -->';
 
 // ---------- 通用 ----------
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const rich = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
-
-const CATS = [
-  ['特性更新', /(特性更新|更新|优化|改进|提升|增强|调整|升级|update|optim|improv|enhance|upgrade)/i],
-  ['新特性', /(新特性|新功能|新增|特性|功能|feature|feat|add|new)/i],
-  ['Bug 修复', /(bug\s*修复|修复|修正|解决|fix|bug|hotfix|repair)/i]
-];
-const ORDER = ['新特性', '特性更新', 'Bug 修复'];
-const normCat = raw => {
-  const s = String(raw || '').trim();
-  for (let i = 0; i < CATS.length; i++) if (CATS[i][1].test(s)) return CATS[i][0];
-  return '';
-};
+const esc = lib.esc;
+const rich = lib.rich;
+const ORDER = lib.ORDER;
 
 const out = (ok, msg, extra) =>
   Object.assign({ ok, gate: ok ? 'pass' : 'stop', msg, view_url: '' }, extra || {});
@@ -90,53 +86,11 @@ function gateItems(raw) {
   return { lines: rawLines };
 }
 
-function parseItems(raw) {
-  const items = [];
-  (Array.isArray(raw) ? raw : String(raw || '').split(/\r?\n/)).forEach(function (line) {
-    let t = String(line).replace(/\s+/g, ' ').trim();
-    if (!t) return;
-    t = t.replace(/^[-*·•]\s*/, '').trim();
-    if (/^(无|暂无|无变更|没有|n\/a|none|null|-+|——)$/i.test(t)) return;
-    const f = t.split('|').map(x => x.trim());
-    if (f.length >= 3) {
-      if (!f[2]) return;
-      items.push({ cat: normCat(f[0]) || '新特性', tag: f[1], title: f[2], desc: f.slice(3).join('|') });
-    } else if (f.length === 2) {
-      const c = normCat(f[0]);
-      if (c) items.push({ cat: c, tag: '', title: f[1], desc: '' });
-      else items.push({ cat: '新特性', tag: f[0], title: f[1], desc: '' });
-    } else {
-      items.push({ cat: '新特性', tag: '', title: t, desc: '' });
-    }
-  });
-  return items;
-}
-
-function buildBlock(verTag, dateOnly, items) {
-  const grouped = { '新特性': [], '特性更新': [], 'Bug 修复': [] };
-  items.forEach(it => grouped[it.cat].push(it));
-
-  const liHtml = it =>
-    '\n                <li>'
-    + '\n                  ' + (it.tag ? '<span class="cl-tag">' + esc(it.tag) + '</span>' : '')
-    + '<div class="cl-t">' + rich(it.title) + '</div>'
-    + (it.desc ? '\n                  <div class="cl-d">' + rich(it.desc) + '</div>' : '')
-    + '\n                </li>';
-
-  const catHtml = ORDER.filter(k => grouped[k].length).map(k =>
-    '\n              <div class="cl-cat">'
-    + '\n                <div class="cl-cat-h">' + k + '</div>'
-    + '\n                <ul class="cl-list">'
-    + grouped[k].map(liHtml).join('')
-    + '\n                </ul>'
-    + '\n              </div>'
-  ).join('');
-
-  return '\n            <div class="cl-ver" data-version="v' + esc(verTag) + '">'
-    + '\n              <div class="cl-month-date">' + esc(dateOnly) + ' · v' + esc(verTag) + '</div>'
-    + catHtml
-    + '\n            </div>';
-}
+// 解析/渲染：委托给 lib.js，保证与 Coze 节点逐字一致
+const parseItems = lib.parseItems;
+const buildBlock = lib.buildBlock;
+const partsOf = lib.partsOf;
+const buildPreview = lib.buildPreview;
 
 /**
  * 把版本块插进 html（按锚点/月份分组），返回 { next, mode }
@@ -220,10 +174,12 @@ function summary(msg, extra) {
   return out(true, msg, extra);
 }
 
-function partsOf(items) {
-  const grouped = { '新特性': 0, '特性更新': 0, 'Bug 修复': 0 };
-  items.forEach(it => grouped[it.cat]++);
-  return ORDER.filter(k => grouped[k]).map(k => k + ' ' + grouped[k]).join(' / ');
+// 预览头部用的日期：优先用配置里能读出时分的形式，否则补北京时间
+function previewDateOf(cfg) {
+  const src = String((cfg && cfg.date) || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(src)) return src.replace('T', ' ');
+  if (/^\d{4}-\d{2}-\d{2}/.test(src)) return src.slice(0, 10);
+  return lib.beijingNow();
 }
 
 // ---------- 配置 ----------
@@ -282,7 +238,8 @@ async function viaApi(cfg, verTag, dateOnly, items) {
     return summary('【dry-run】将' + head + '，共 ' + items.length + ' 条（' + partsOf(items) + '），'
       + where + '（未真正提交）', {
       channel: 'api', mode: r.mode, size_before: Buffer.byteLength(html), size_after: Buffer.byteLength(r.next),
-      put_body: putBody, view_url: cfg.view_base || ''
+      put_body: putBody, view_url: cfg.view_base || '',
+      preview: buildPreview(verTag, previewDateOf(cfg), items)
     });
   }
 
@@ -295,7 +252,8 @@ async function viaApi(cfg, verTag, dateOnly, items) {
   return summary(head + '，共 ' + items.length + ' 条（' + partsOf(items) + '），' + where
     + (view ? '\n查看：' + view : ''), {
     channel: 'api', mode: r.mode, size_before: Buffer.byteLength(html), size_after: Buffer.byteLength(r.next),
-    view_url: view
+    view_url: view,
+    preview: buildPreview(verTag, previewDateOf(cfg), items)
   });
 }
 
@@ -317,7 +275,8 @@ function viaLocal(cfg, verTag, dateOnly, items) {
     return summary('【dry-run】将' + head + '，共 ' + items.length + ' 条（' + partsOf(items) + '），'
       + where + '（未真正落盘）', {
       channel: 'local', mode: r.mode, size_before: Buffer.byteLength(html), size_after: Buffer.byteLength(r.next),
-      local_path: file, view_url: cfg.view_base || ''
+      local_path: file, view_url: cfg.view_base || '',
+      preview: buildPreview(verTag, previewDateOf(cfg), items)
     });
   }
 
@@ -327,7 +286,8 @@ function viaLocal(cfg, verTag, dateOnly, items) {
     + '\n文件：' + file
     + (view ? '\n查看（推送后生效）：' + view : ''), {
     channel: 'local', mode: r.mode, size_before: Buffer.byteLength(html), size_after: Buffer.byteLength(r.next),
-    local_path: file, view_url: view
+    local_path: file, view_url: view,
+    preview: buildPreview(verTag, previewDateOf(cfg), items)
   });
 }
 
@@ -370,7 +330,7 @@ function readStdin() {
 
     let dateOnly = String(merged.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}/.test(dateOnly)) {
-      dateOnly = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      dateOnly = lib.beijingNow().slice(0, 10);
     } else {
       dateOnly = dateOnly.slice(0, 10);
     }
@@ -380,6 +340,20 @@ function readStdin() {
 
     const items = parseItems(gate.lines);
     if (!items.length) return console.log(JSON.stringify(out(false, '没有解析到任何条目，请检查 items')));
+
+    // ★ preview_only：只出预览、不碰任何文件。给「第 3 步 出预览给用户确认」用。
+    //   放在最前面，确保任何通道配置下都不会误写文件。
+    if (merged.preview_only === true || merged.previewOnly === true
+      || String(merged.preview_only || '').toLowerCase() === 'true') {
+      return console.log(JSON.stringify(out(true,
+        '已生成预览（未写入任何文件）',
+        {
+          channel: 'none',
+          preview: buildPreview(verTag, previewDateOf(merged), items),
+          count: items.length,
+          parts: partsOf(items)
+        }), null, 2));
+    }
 
     const token = process.env.GITHUB_TOKEN || merged.token;
 

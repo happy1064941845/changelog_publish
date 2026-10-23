@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * render.js —— 纯渲染器：把「清单」渲染成可直接插入页面的 cl-ver 代码块。
+ * render.js —— 纯渲染器：把「清单」渲染成
+ *   ① 与 Coze 工作流 A 节点三逐字一致的「📋 更新日志预览」文本（主输出）
+ *   ② 可直接插入页面的 cl-ver 代码块（辅助输出，与 Coze 写入节点一致）
  *
  * 用法（stdin 传 JSON）：
  *   node render.js <<'EOF'
@@ -12,10 +14,14 @@
  *   EOF
  *
  * 输出 JSON：
- *   { "ok": true, "block": "<div class=\"cl-ver\"…>…</div>", "count": 3, "parts": "特性更新 2 / Bug 修复 1",
+ *   { "ok": true, "preview": "📋 更新日志预览…", "block": "<div class=\"cl-ver\"…>…</div>",
+ *     "count": 3, "parts": "特性更新 2 / Bug 修复 1",
  *     "mode_hint": "same-month", "ym": "2026-10" }
  *
  * 只做渲染，不碰文件、不碰网络。写入由 write.js 负责。
+ *
+ * ★ 版式与解析规则全部来自同目录 lib.js —— 该文件是「更新日志渲染规则」的唯一定义源，
+ *   逐字对齐 Coze 的 coze-preview-node.js / coze-commit-node.js。改规则要三处一起改。
  *
  * 清单格式（每行一条，竖线分隔）：
  *   类别 | 模块 | 标题 | 描述
@@ -25,88 +31,7 @@
 
 'use strict';
 
-const CATS = [
-  // 顺序要紧：「特性更新」必须排在「新特性」前面，否则被「特性」二字抢先匹配
-  ['特性更新', /(特性更新|更新|优化|改进|提升|增强|调整|升级|update|optim|improv|enhance|upgrade)/i],
-  ['新特性', /(新特性|新功能|新增|特性|功能|feature|feat|add|new)/i],
-  ['Bug 修复', /(bug\s*修复|修复|修正|解决|fix|bug|hotfix|repair)/i]
-];
-
-const ORDER = ['新特性', '特性更新', 'Bug 修复'];
-
-function normCat(raw) {
-  const s = String(raw || '').trim();
-  for (let i = 0; i < CATS.length; i++) if (CATS[i][1].test(s)) return CATS[i][0];
-  return '';
-}
-
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-// 反引号包起来的内容渲染成行内代码：`xxx` → <code>xxx</code>
-const rich = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
-
-function parseItems(raw) {
-  const items = [];
-  String(raw || '').split(/\r?\n/).forEach(function (line) {
-    let t = String(line).replace(/\s+/g, ' ').trim();
-    if (!t) return;
-    t = t.replace(/^[-*·•]\s*/, '').trim();
-    if (/^(无|暂无|无变更|没有|n\/a|none|null|-+|——)$/i.test(t)) return;
-
-    const f = t.split('|').map(x => x.trim());
-    if (f.length >= 3) {
-      if (!f[2]) return;
-      // 描述里本身可能含竖线，第 4 段起全部并回描述
-      items.push({ cat: normCat(f[0]) || '新特性', tag: f[1], title: f[2], desc: f.slice(3).join('|') });
-    } else if (f.length === 2) {
-      const c = normCat(f[0]);
-      if (c) items.push({ cat: c, tag: '', title: f[1], desc: '' });
-      else items.push({ cat: '新特性', tag: f[0], title: f[1], desc: '' });
-    } else {
-      items.push({ cat: '新特性', tag: '', title: t, desc: '' });
-    }
-  });
-  return items;
-}
-
-function buildBlock(version, date, items) {
-  const verTag = String(version || '').trim().replace(/^[vV]/, '');
-  if (!verTag) throw new Error('缺少版本号');
-
-  // 页面版本行只显示日期，不带时分
-  const dateOnly = String(date || '').trim().slice(0, 10);
-  const ym = dateOnly.slice(0, 7);
-  const y = String(Number(ym.slice(0, 4)));
-  const mo = String(Number(ym.slice(5, 7)));
-
-  const grouped = { '新特性': [], '特性更新': [], 'Bug 修复': [] };
-  items.forEach(it => grouped[it.cat].push(it));
-
-  // 标题进 .cl-t、描述进 .cl-d（分隔符 ' — ' 由页面 CSS .cl-t::after 自动生成，不要手写）
-  const liHtml = it =>
-    '\n                <li>'
-    + '\n                  ' + (it.tag ? '<span class="cl-tag">' + esc(it.tag) + '</span>' : '')
-    + '<div class="cl-t">' + rich(it.title) + '</div>'
-    + (it.desc ? '\n                  <div class="cl-d">' + rich(it.desc) + '</div>' : '')
-    + '\n                </li>';
-
-  const catHtml = ORDER.filter(k => grouped[k].length).map(k =>
-    '\n              <div class="cl-cat">'
-    + '\n                <div class="cl-cat-h">' + k + '</div>'
-    + '\n                <ul class="cl-list">'
-    + grouped[k].map(liHtml).join('')
-    + '\n                </ul>'
-    + '\n              </div>'
-  ).join('');
-
-  const block = '\n            <div class="cl-ver" data-version="v' + esc(verTag) + '">'
-    + '\n              <div class="cl-month-date">' + esc(dateOnly) + ' · v' + esc(verTag) + '</div>'
-    + catHtml
-    + '\n            </div>';
-
-  const parts = ORDER.filter(k => grouped[k].length).map(k => k + ' ' + grouped[k].length).join(' / ');
-
-  return { verTag, dateOnly, ym, y, mo, block, parts, count: items.length };
-}
+const lib = require('./lib.js');
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -130,18 +55,35 @@ function readStdin() {
   }
 
   try {
-    const items = parseItems(cfg.items);
+    const verTag = String(cfg.version || '').trim().replace(/^[vV]/, '');
+    if (!verTag) throw new Error('缺少版本号');
+
+    const items = lib.parseItems(cfg.items);
     if (!items.length) throw new Error('没有解析到任何条目');
-    const r = buildBlock(cfg.version, cfg.date, items);
+
+    // 日期：页面版本行只显示日期（前 10 位）；预览头部保留可读的日期时间
+    const src = String(cfg.date || '').trim();
+    const hasTime = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(src);
+    const dateOnly = /^\d{4}-\d{2}-\d{2}/.test(src) ? src.slice(0, 10) : lib.beijingNow().slice(0, 10);
+    const previewDate = hasTime ? src.replace('T', ' ') : (src ? src.slice(0, 10) : lib.beijingNow());
+
+    const ym = dateOnly.slice(0, 7);
+    const y = String(Number(ym.slice(0, 4)));
+    const mo = String(Number(ym.slice(5, 7)));
+
     console.log(JSON.stringify({
       ok: true,
-      block: r.block,
-      count: r.count,
-      parts: r.parts,
-      verTag: r.verTag,
-      ym: r.ym,
-      year_month_cn: r.y + '年' + r.mo + '月',
-      mode_hint: cfg.existing_months && cfg.existing_months.indexOf(r.ym) !== -1 ? 'same-month' : 'new-month'
+      // ★ 主输出：版式与 Coze 预览逐字一致
+      preview: lib.buildPreview(verTag, previewDate, items),
+      // 辅助输出：可直接插入页面的块
+      block: lib.buildBlock(verTag, dateOnly, items),
+      count: items.length,
+      parts: lib.partsOf(items),
+      verTag: verTag,
+      date_only: dateOnly,
+      ym: ym,
+      year_month_cn: y + '年' + mo + '月',
+      mode_hint: cfg.existing_months && cfg.existing_months.indexOf(ym) !== -1 ? 'same-month' : 'new-month'
     }, null, 2));
   } catch (e) {
     console.log(JSON.stringify({ ok: false, error: e.message }));
