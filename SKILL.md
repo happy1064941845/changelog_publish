@@ -213,11 +213,17 @@ git push <remote> HEAD:<branch>
 
 ```bash
 node <skill-dir>/scripts/parity-test.js
-# 需要 Coze 节点源文件时用环境变量指定目录：
-# COZE_DIR="<含 coze-preview-node.js 的目录>" node <skill-dir>/scripts/parity-test.js
+# 想让它同时对比真实 Coze 节点（第 2 层校验），指定节点所在目录：
+COZE_DIR="<含 coze-preview-node.js 的目录>" node <skill-dir>/scripts/parity-test.js
 ```
 
-全 PASS 才算改完。**只改一处 = 两条链路重新分裂**，这正是这次要修的问题根因。
+回归分两层：
+
+- **第 1 层 · 黄金快照**（永远可跑）：断言 `lib.js` 的行为没被改坏，**不依赖 Coze 文件**，可移植。
+- **第 2 层 · 实链路对比**（找得到 Coze 节点时才跑）：直接调 `coze-preview-node.js`，逐字比。
+
+输出末尾会标明第 2 层是否参与。**两层全 PASS 才算改完**；只改一处 = 两条链路重新分裂，
+**这正是本次要修的问题根因**。
 
 ## 环境要求
 

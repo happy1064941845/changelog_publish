@@ -75,3 +75,29 @@ git push <remote> HEAD:<branch>
   - `X-Accepted-Github-Permissions: contents=read` → token 有效、读权限在
   - `X-RateLimit-Remaining` 数字不小 → 不是限流
   - `Github-Authentication-Token-Expiration` 有值 → 没过期
+
+## 七、预览与 Coze 不一致（本 skill 独有）
+
+**症状**：同一份更新说明，本 skill 出的预览和「飞书 → Coze」链路出的不一样（版式、缩进、条数、措辞有出入）。
+
+**根因**：预览文本如果不是由脚本产出、而是模型临场手写，每次会话都可能不同。本 skill 已把预览改为
+**脚本确定性产出**（`scripts/lib.js` 的 `buildPreview()`），与 Coze 工作流 A 节点三逐字一致。
+
+**自查与修复**：
+
+1. 确认出预览时走的是脚本（`write.js` 带 `preview_only: true`），**不是模型自己拼的文本**。
+   模型手写预览 = 违反 SKILL.md 第 3 步，报"预览不一致"就该往这里看。
+2. 跑一致性回归，看 skill 与 Coze 节点是否逐字一致：
+
+   ```bash
+   node scripts/parity-test.js
+   # 用 COZE_DIR 指向含 coze-preview-node.js 的目录
+   ```
+
+3. 若回归 FAIL，说明有一方被改过而另一方没跟上 —— **改的是哪条规则，就去 `lib.js` 和对应
+   Coze 代码节点同步改**（常见漏改：分类归一正则顺序、每类上限、拆段阈值、版式空白字符）。
+4. **注意空白字符**：预览头部的双空格、描述行的 `3 空格 + —— + 1 空格`，差一个空格回归就会 FAIL。
+   别用编辑器"美化"这些文本。
+
+**为什么要这么严**：两条链路是同一份更新日志的两种入口（飞书对话 / 直接对智能体说），
+产出不一致会让用户以为"其中一个写错了"，也会让页面版本块的文案忽好忽坏。一致性是这套方案的信任基础。
