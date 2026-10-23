@@ -125,6 +125,7 @@ node <skill-dir>/scripts/write.js <<'EOF'
   "config": "changelog.config.json",
   "version": "v1.8.0",
   "date": "2026-10-23",
+  "count": 2,
   "items": "特性更新|环境管理|自定义环境支持打包发布|完成的…\nBug 修复|前端|修复置顶偶发报错|服务启动时自动创建所需目录。"
 }
 EOF
@@ -136,16 +137,20 @@ EOF
 "items 格式不对"。这是最容易犯、也最难自查的错误：一旦漏过去，页面上会表现为"所有条目都挤在
 【新特性】、标题拖着句号、没有模块胶囊和描述行"。
 
+`count` **建议一并带上**（填第 3 步预览里的条数）。脚本会像 Coze 写入节点一样做**条数闸**：
+`count` 与本次 `items` 实际解析出的条数对不上时直接拒写，提示"条目数和预览对不上"。这能挡住
+"给用户确认了 7 条、实际只写了 6 条"这类静默漏条。
+
 脚本返回 JSON，关注这几个字段：
 
 | 字段 | 含义 |
 |---|---|
 | `ok` | 是否成功 |
-| `msg` | 中文结果说明，可直接转述给用户 |
+| `msg` | 中文结果说明，可直接转述给用户（与 Coze 写入节点逐字一致；成功时末行带 `查看：<url>`） |
 | `channel` | `api` / `local` / `none` |
 | `mode` | `same-month`（并入已有月份）/ `new-month`（新建月份分组）/ `overwrite`（覆盖同名版本） |
 | `preview` | 与 Coze 一致的那段预览文本（可用来复核写入内容与预览一致） |
-| `view_url` | 查看地址（有配置 `view_base` 时） |
+| `view_url` | 查看地址：默认指向文档站更新日志锚点，自动补 `#changelog`；配了 `view_base` 则用它 |
 | `size_before` / `size_after` | 写入前后字节数 |
 
 **建议先跑一次 `"dry_run": true`**，确认条数、分类、插入位置都对，再去掉这个字段真写。
@@ -193,36 +198,57 @@ git push <remote> HEAD:<branch>
 
 | 脚本 | 用途 | 是否碰文件 |
 |---|---|---|
-| `scripts/lib.js` | **渲染规则唯一定义源**：分类归一、清单解析、拆段兜底、预览版式、块渲染 | 否 |
+| `scripts/lib.js` | **规则唯一定义源**：分类归一、清单解析、拆段兜底、预览版式、块渲染、**提交规则与回执文案** | 否 |
 | `scripts/render.js` | 纯渲染：清单 → 预览文本 + `cl-ver` 代码块 | 否 |
 | `scripts/write.js` | 渲染 + 插入页面 + 提交（API 或本地）；加 `preview_only` 只出预览 | 是（除 `preview_only`） |
-| `scripts/parity-test.js` | 双链路一致性回归：断言 skill 与 Coze 节点产出逐字一致 | 否 |
+| `scripts/parity-test.js` | 三层一致性回归：黄金快照 + 与 Coze 预览/写入节点逐字对比 | 否 |
 
 三个脚本都用 stdin 传 JSON。
 
 ### ★★ 与 Coze 链路的一致性契约（改规则前必读）
 
-本 skill 的预览文本、`items` 清单、写进页面的块，**都与「飞书 → Coze」链路逐字一致**。
-一致性靠 `scripts/lib.js` 承载 —— 它是这套渲染规则的**唯一定义源**，逐字对齐 Coze 的：
+本 skill 的**预览文本、`items` 清单、写进页面的块（样式），以及写入侧的提交规则与回执文案**，
+**都与「飞书 → Coze」链路逐字一致**。一致性靠 `scripts/lib.js` 承载 —— 它是这套规则的
+**唯一定义源**，逐字对齐 Coze 的：
 
 - `coze-preview-node.js`（工作流 A 节点三：出预览）
 - `coze-commit-node.js`（工作流 B 节点三：写入 + 出清单）
 
-**改任何一条渲染/解析规则（分类归一、拆段兜底、每类上限、版式、日期格式），必须三处同步改**，
-然后跑一致性回归确认：
+**逐字对齐的清单一共四块**（改动任何一块都要三处同步改）：
+
+| 契约块 | 内容 | 承载 |
+|---|---|---|
+| 解析/归一 | 分类归一顺序、拆段兜底、每类上限 8、占位行过滤 | `lib.js` |
+| 预览版式 | `📋 更新日志预览` 全套排版（空格数、`【】`分组、`—— `前缀、分隔线、引导语） | `lib.js` |
+| 页面块样式 | `cl-ver`/`cl-month-date`/`cl-cat`/`cl-list`/`cl-tag`/`cl-t`/`cl-d` 逐字符一致 | `lib.js` |
+| **提交规则** | 格式闸、**条数闸**、幂等拦截、overwrite 整块覆盖、`where`/成功回执/commit message 文案、`view_url` 默认值 | `lib.js` |
+
+提交规则这几条的取值（与 Coze 一致，不要各自发明）：
+
+- `view_url`：`page_url || '…/AIDevspace.html'`，末尾无 `#` 时自动补 `#changelog`。
+- `where`：`并入 Y年M月` / `覆盖原 vX（位置不变）` / **`新建 Y年M月分组`**（注意"分组"二字）。
+- 成功回执：`已写入 vX` / `已修改 vX`；commit message：`docs(changelog): vX` / `docs(changelog): 修改 vX`。
+- 幂等拦截：三条出路的提示语与 Coze 逐字一致。
+- **条数闸**：`count > 0 && 解析条数 !== count` → 拒写。
+- 覆盖模式：**整块替换**同名 `cl-ver` 块，**位置与版本号不变**。
+
+**改任何一条规则，必须三处同步改**（`lib.js` + 两个 Coze 节点），然后跑一致性回归确认：
 
 ```bash
 node <skill-dir>/scripts/parity-test.js
-# 想让它同时对比真实 Coze 节点（第 2 层校验），指定节点所在目录：
-COZE_DIR="<含 coze-preview-node.js 的目录>" node <skill-dir>/scripts/parity-test.js
+# 想让它同时对比真实 Coze 节点（第 2、3 层校验），指定节点所在目录：
+COZE_DIR="<含 coze-preview-node.js / coze-commit-node.js 的目录>" node <skill-dir>/scripts/parity-test.js
 ```
 
-回归分两层：
+回归分三层：
 
 - **第 1 层 · 黄金快照**（永远可跑）：断言 `lib.js` 的行为没被改坏，**不依赖 Coze 文件**，可移植。
-- **第 2 层 · 实链路对比**（找得到 Coze 节点时才跑）：直接调 `coze-preview-node.js`，逐字比。
+- **第 2 层 · 预览实链路对比**（找得到 `coze-preview-node.js` 时才跑）：直接调它，逐字比预览与清单。
+- **第 3 层 · 写入实链路对比**（找得到 `coze-commit-node.js` 时才跑）：给同一张合成页 + 同一份入参，
+  断言两边产出的**页面变更 / `mode` / 回执文案**逐字一致，覆盖「并入当月 / 新建月份 / 幂等拦截 /
+  覆盖写入 / 条数闸」五种情形。
 
-输出末尾会标明第 2 层是否参与。**两层全 PASS 才算改完**；只改一处 = 两条链路重新分裂，
+输出末尾会标明各层是否参与。**全 PASS 才算改完**；只改一处 = 两条链路重新分裂，
 **这正是本次要修的问题根因**。
 
 ## 环境要求

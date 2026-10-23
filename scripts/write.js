@@ -61,30 +61,13 @@ function findDivBlockEnd(src, start) {
   return -1;
 }
 
-// 格式闸：items 必须是预览节点产出的定稿清单，每行「类别|模块|标题|描述」四段。
-// 若模型没照抄清单、而是把用户原文整行搬来，就没有竖线 —— 那种行会被 parseItems
-// 兜底成"新特性 + 无模块 + 无描述"，页面表现为"全都挤在新特性、标题带句号、没有
-// 蓝胶囊和描述行"。这是最难自查的错误，所以在解析前先拦住并说清原因。
-function gateItems(raw) {
-  const rawLines = String(raw || '').split(/\r?\n/)
-    .map(l => String(l).replace(/\s+/g, ' ').trim())
-    .filter(l => l && !/^(无|暂无|无变更|没有|n\/a|none|null|-+|——)$/i.test(l));
-
-  const noPipe = rawLines.filter(l => l.indexOf('|') === -1);
-  if (rawLines.length && noPipe.length === rawLines.length) {
-    return { error: '未写入：items 格式不对，看起来是把更新说明原文直接传了过来，不是预览产出的定稿清单。\n'
-      + '正确格式每行都是四段、用竖线分隔：类别|模块|标题|描述，例如：\n'
-      + '  特性更新|环境管理|job-env-manager 更新至 0.0.66|提升服务稳定性。\n'
-      + '请重新预览一次，把预览返回的 items 原样复制过来再确认。\n'
-      + '（这次收到的是："' + noPipe[0].slice(0, 40) + '…"）' };
-  }
-  if (noPipe.length) {
-    return { error: '未写入：items 里有 ' + noPipe.length + ' 行缺少竖线分隔，格式不统一，已拦下避免写坏页面。\n'
-      + '正确格式：类别|模块|标题|描述。问题行示例："' + noPipe[0].slice(0, 40) + '…"\n'
-      + '请重新预览，把返回的 items 整段原样复制过来。' };
-  }
-  return { lines: rawLines };
-}
+// 格式闸 / 回执文案：委托 lib.js，与 Coze 写入节点逐字一致
+const gateItems = lib.gateItems;
+const whereOf = lib.whereOf;
+const successHead = lib.successHead;
+const commitMessage = lib.commitMessage;
+const duplicateMsg = lib.duplicateMsg;
+const countMismatchMsg = lib.countMismatchMsg;
 
 // 解析/渲染：委托给 lib.js，保证与 Coze 节点逐字一致
 const parseItems = lib.parseItems;
@@ -105,10 +88,8 @@ function insertBlock(html, verTag, dateOnly, items, overwrite) {
   const mo = String(Number(ym.slice(5, 7)));
   const verBlock = buildBlock(verTag, dateOnly, items);
 
-  // overwrite 允许布尔 true / 字符串 'true' / '1'
-  const wantOverwrite = overwrite === true
-    || String(overwrite || '').toLowerCase() === 'true'
-    || String(overwrite || '') === '1';
+  // overwrite 允许布尔 true / 字符串 'true' / '1'（与 Coze 一致）
+  const wantOverwrite = lib.wantOverwrite(overwrite);
 
   // ---- 同名版本处理 ----
   const oldTag = 'data-version="v' + verTag + '"';
@@ -116,8 +97,8 @@ function insertBlock(html, verTag, dateOnly, items, overwrite) {
   let overwriteFrom = -1;
   if (oldAt !== -1) {
     if (!wantOverwrite) {
-      return { error: 'v' + verTag + ' 已经写过了，这次没有重复写入。'
-        + '（要修改它，先在页面撤回那一块，或预览时改用新版本号，或在参数里加 overwrite=true 直接覆盖。）' };
+      // 幂等拦截：文案与 Coze 写入节点逐字一致；view_url 由调用方按配置补
+      return { error: duplicateMsg(verTag), duplicate: true };
     }
     overwriteFrom = html.lastIndexOf('<div class="cl-ver"', oldAt);
     if (overwriteFrom === -1) overwriteFrom = html.lastIndexOf('<div', oldAt);
@@ -125,7 +106,7 @@ function insertBlock(html, verTag, dateOnly, items, overwrite) {
   }
 
   if (html.indexOf(START) === -1) {
-    return { error: '页面缺少 ' + START + ' 锚点，先按参考文档把锚点加进 .changelog 内部' };
+    return { error: '未写入：页面缺少 CHANGELOG:START 锚点，请先按手册把锚点加进 .changelog 内部' };
   }
 
   let mi = html.indexOf('data-month="' + ym + '"');
@@ -167,7 +148,7 @@ function insertBlock(html, verTag, dateOnly, items, overwrite) {
       }
     }
   }
-  return { next, mode, ym, year_month_cn: y + '年' + mo + '月' };
+  return { next, mode, ym, y: y, mo: mo, year_month_cn: y + '年' + mo + '月' };
 }
 
 function summary(msg, extra) {
@@ -194,7 +175,7 @@ function loadConfig(argv) {
 }
 
 // ---------- 通道：GitHub API ----------
-async function viaApi(cfg, verTag, dateOnly, items) {
+async function viaApi(cfg, verTag, dateOnly, items, count) {
   const token = process.env.GITHUB_TOKEN || cfg.token;
   if (!token) throw new Error('NO_TOKEN');
 
@@ -202,6 +183,9 @@ async function viaApi(cfg, verTag, dateOnly, items) {
   const p = cfg.path;                    // "AIDevspace.html"
   const branch = cfg.branch || 'main';
   if (!repo || !p) throw new Error('配置缺 repo 或 path');
+
+  // 查看地址：与 Coze 写入节点一致（默认页址 + 自动补 #changelog 锚点）
+  const view = lib.viewUrlOf(cfg.view_base || cfg.page_url);
 
   const api = 'https://api.github.com/repos/' + repo + '/contents/' + p + '?ref=' + branch;
   const hdr = {
@@ -220,15 +204,18 @@ async function viaApi(cfg, verTag, dateOnly, items) {
   const html = Buffer.from(String(jr.content).replace(/[\r\n]/g, ''), 'base64').toString('utf8');
 
   const r = insertBlock(html, verTag, dateOnly, items, cfg.overwrite);
-  if (r.error) return out(false, r.error, { view_url: cfg.view_base || '', channel: 'api' });
+  if (r.error) return out(false, r.error, { view_url: view, channel: 'api' });
 
-  const where = r.mode === 'same-month' ? '并入 ' + r.year_month_cn
-    : r.mode === 'overwrite' ? '覆盖原 v' + verTag + '（位置不变）'
-    : '新建 ' + r.year_month_cn;
-  const head = r.mode === 'overwrite' ? '已修改 v' + verTag : '已写入 v' + verTag;
+  // ★ 条数闸：与 Coze 写入节点一致 —— 预览条数与实际清单条数对不上就拒写
+  if (Number(count) > 0 && items.length !== Number(count)) {
+    return out(false, countMismatchMsg(count, items.length), { view_url: view, channel: 'api' });
+  }
+
+  const where = whereOf(r.mode, r.y, r.mo, verTag);
+  const head = successHead(r.mode, verTag);
 
   const putBody = JSON.stringify({
-    message: (r.mode === 'overwrite' ? 'docs(changelog): 修改 v' : 'docs(changelog): v') + verTag,
+    message: commitMessage(r.mode, verTag),
     content: Buffer.from(r.next, 'utf8').toString('base64'),
     sha: jr.sha,
     branch
@@ -238,7 +225,7 @@ async function viaApi(cfg, verTag, dateOnly, items) {
     return summary('【dry-run】将' + head + '，共 ' + items.length + ' 条（' + partsOf(items) + '），'
       + where + '（未真正提交）', {
       channel: 'api', mode: r.mode, size_before: Buffer.byteLength(html), size_after: Buffer.byteLength(r.next),
-      put_body: putBody, view_url: cfg.view_base || '',
+      put_body: putBody, view_url: view,
       preview: buildPreview(verTag, previewDateOf(cfg), items)
     });
   }
@@ -246,11 +233,10 @@ async function viaApi(cfg, verTag, dateOnly, items) {
   const wr = await fetch(api.split('?')[0], { method: 'PUT', headers: hdr, body: putBody });
   if (!wr.ok) {
     const body = await wr.text();
-    return out(false, '写入失败 ' + wr.status + '：' + body.slice(0, 300), { channel: 'api' });
+    return out(false, '写入失败 ' + wr.status + '：' + body.slice(0, 300), { channel: 'api', view_url: view });
   }
-  const view = cfg.view_base || '';
   return summary(head + '，共 ' + items.length + ' 条（' + partsOf(items) + '），' + where
-    + (view ? '\n查看：' + view : ''), {
+    + '\n查看：' + view, {
     channel: 'api', mode: r.mode, size_before: Buffer.byteLength(html), size_after: Buffer.byteLength(r.next),
     view_url: view,
     preview: buildPreview(verTag, previewDateOf(cfg), items)
@@ -258,33 +244,40 @@ async function viaApi(cfg, verTag, dateOnly, items) {
 }
 
 // ---------- 通道：本地文件 ----------
-function viaLocal(cfg, verTag, dateOnly, items) {
+function viaLocal(cfg, verTag, dateOnly, items, count) {
   const file = cfg.local_file;
   if (!file || !fs.existsSync(file)) throw new Error('NO_LOCAL');
 
+  // 查看地址：与 Coze 写入节点一致（默认页址 + 自动补 #changelog 锚点）
+  const view = lib.viewUrlOf(cfg.view_base || cfg.page_url);
+
   const html = fs.readFileSync(file, 'utf8');
   const r = insertBlock(html, verTag, dateOnly, items, cfg.overwrite);
-  if (r.error) return out(false, r.error, { channel: 'local', local_path: file, view_url: cfg.view_base || '' });
+  if (r.error) return out(false, r.error, { channel: 'local', local_path: file, view_url: view });
 
-  const where = r.mode === 'same-month' ? '并入 ' + r.year_month_cn
-    : r.mode === 'overwrite' ? '覆盖原 v' + verTag + '（位置不变）'
-    : '新建 ' + r.year_month_cn;
-  const head = r.mode === 'overwrite' ? '已修改本地 v' + verTag : '已写入本地 v' + verTag;
+  // ★ 条数闸：与 Coze 写入节点一致 —— 预览条数与实际清单条数对不上就拒写
+  if (Number(count) > 0 && items.length !== Number(count)) {
+    return out(false, countMismatchMsg(count, items.length), { channel: 'local', local_path: file, view_url: view });
+  }
+
+  const where = whereOf(r.mode, r.y, r.mo, verTag);
+  // 本地通道 Coze 没有，加「本地」二字说明改动只落在磁盘、尚未推送
+  const head = (r.mode === 'overwrite' ? '已修改本地 v' : '已写入本地 v') + verTag;
 
   if (cfg.dry_run) {
     return summary('【dry-run】将' + head + '，共 ' + items.length + ' 条（' + partsOf(items) + '），'
       + where + '（未真正落盘）', {
       channel: 'local', mode: r.mode, size_before: Buffer.byteLength(html), size_after: Buffer.byteLength(r.next),
-      local_path: file, view_url: cfg.view_base || '',
+      local_path: file, view_url: view,
       preview: buildPreview(verTag, previewDateOf(cfg), items)
     });
   }
 
   fs.writeFileSync(file, r.next, 'utf8');
-  const view = cfg.view_base || '';
   return summary(head + '，共 ' + items.length + ' 条（' + partsOf(items) + '），' + where
     + '\n文件：' + file
-    + (view ? '\n查看（推送后生效）：' + view : ''), {
+    + '\n建议提交：git commit -m "' + commitMessage(r.mode, verTag) + '"'
+    + '\n查看（推送后生效）：' + view, {
     channel: 'local', mode: r.mode, size_before: Buffer.byteLength(html), size_after: Buffer.byteLength(r.next),
     local_path: file, view_url: view,
     preview: buildPreview(verTag, previewDateOf(cfg), items)
@@ -302,7 +295,7 @@ function readStdin() {
   });
 }
 
-(async function main() {
+async function main() {
   try {
     const argv = {};
     process.argv.slice(2).forEach(a => {
@@ -326,7 +319,7 @@ function readStdin() {
     const merged = Object.assign({}, fileCfg, cfg);
 
     const verTag = String(merged.version || '').trim().replace(/^[vV]/, '');
-    if (!verTag) return console.log(JSON.stringify(out(false, '缺少版本号')));
+    if (!verTag) return console.log(JSON.stringify(out(false, '未写入：缺少版本号')));
 
     let dateOnly = String(merged.date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}/.test(dateOnly)) {
@@ -339,7 +332,13 @@ function readStdin() {
     if (gate.error) return console.log(JSON.stringify(out(false, gate.error)));
 
     const items = parseItems(gate.lines);
-    if (!items.length) return console.log(JSON.stringify(out(false, '没有解析到任何条目，请检查 items')));
+    if (!items.length) return console.log(JSON.stringify(out(false, '未写入：没有解析到任何条目，请重新预览')));
+
+    // ★ 条数闸：预览条数（count）与实际清单条数必须一致（与 Coze 写入节点一致）
+    const count = Number(merged.count || 0);
+    if (count > 0 && items.length !== count) {
+      return console.log(JSON.stringify(out(false, countMismatchMsg(count, items.length))));
+    }
 
     // ★ preview_only：只出预览、不碰任何文件。给「第 3 步 出预览给用户确认」用。
     //   放在最前面，确保任何通道配置下都不会误写文件。
@@ -360,7 +359,7 @@ function readStdin() {
     // 优先 API；无 token 时退回本地文件
     if (token) {
       try {
-        return console.log(JSON.stringify(await viaApi(Object.assign({}, merged, { token }), verTag, dateOnly, items), null, 2));
+        return console.log(JSON.stringify(await viaApi(Object.assign({}, merged, { token }), verTag, dateOnly, items, count), null, 2));
       } catch (e) {
         if (e.message !== 'NO_TOKEN') {
           return console.log(JSON.stringify(out(false, String(e.message), { channel: 'api' }), null, 2));
@@ -369,7 +368,7 @@ function readStdin() {
     }
 
     try {
-      return console.log(JSON.stringify(viaLocal(merged, verTag, dateOnly, items), null, 2));
+      return console.log(JSON.stringify(viaLocal(merged, verTag, dateOnly, items, count), null, 2));
     } catch (e) {
       if (e.message === 'NO_LOCAL') {
         return console.log(JSON.stringify(out(false,
@@ -383,4 +382,12 @@ function readStdin() {
   } catch (e) {
     console.log(JSON.stringify(out(false, '未预期错误：' + String(e && e.message || e))));
   }
-})();
+}
+
+// 可被 require 当模块用（parity-test 直接调 insertBlock 做写入侧对比）；
+// 直接 `node write.js` 时仍是 CLI，跑 main()。
+if (require.main === module) {
+  main();
+} else {
+  module.exports = { insertBlock, findDivBlockEnd, main };
+}

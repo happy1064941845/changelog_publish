@@ -38,6 +38,26 @@ const clean = x => String(x == null ? '' : x).replace(/\s+/g, ' ').trim().replac
 const cleanDesc = x => String(x == null ? '' : x).replace(/\s+/g, ' ').trim();
 const isNone = x => !x || /^(无|暂无|无变更|没有|n\/a|none|null|-+|——)$/i.test(x);
 
+// ---- 查看地址：与 Coze 写入节点一致（默认页址 + 自动补 #changelog 锚点）----
+const DEFAULT_PAGE_URL = 'https://huaweicloud.github.io/aievspace-operation-guide/AIDevspace.html';
+function viewUrlOf(pageUrl) {
+  const base = String(pageUrl || '').trim() || DEFAULT_PAGE_URL;
+  return base + (base.indexOf('#') === -1 ? '#changelog' : '');
+}
+
+// ---- 版本号：允许预发布后缀，1.6.3 / 0.0.1-alpha.29 ----
+const VERSION_RE = /^\d+(\.\d+){1,3}(-[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
+function verTagOf(version) {
+  return String(version || '').trim().replace(/^[vV]/, '');
+}
+
+// ---- overwrite 取值宽容：布尔 true / 字符串 'true' / '1'（与 Coze 一致）----
+function wantOverwrite(v) {
+  return v === true
+    || String(v || '').toLowerCase() === 'true'
+    || String(v || '') === '1';
+}
+
 // 兜底拆段：模型偶尔会把"结论＋细节"整句塞进 title、desc 留空，
 // 页面上就成了一大坨没有重点的长句。这里在渲染前再兜一道 ——
 // 若 title 过长又含逗号/冒号/破折号，就在第一个分隔符处切开：前半进 title，后半进 desc。
@@ -58,6 +78,66 @@ function splitLong(title, desc) {
  */
 function beijingNow() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+}
+
+// ---------- 回执文案：与 Coze 写入节点逐字一致 ----------
+
+/** 「并入 2026年10月」/「覆盖原 v1.8.0（位置不变）」/「新建 2026年10月分组」 */
+function whereOf(mode, y, mo, verTag) {
+  return mode === 'same-month' ? '并入 ' + y + '年' + mo + '月'
+    : mode === 'overwrite' ? '覆盖原 v' + verTag + '（位置不变）'
+    : '新建 ' + y + '年' + mo + '月分组';
+}
+
+/** 成功回执的行首：覆盖写「已修改 vX」，其余写「已写入 vX」 */
+function successHead(mode, verTag) {
+  return mode === 'overwrite' ? '已修改 v' + verTag : '已写入 v' + verTag;
+}
+
+/** commit message：覆盖写「docs(changelog): 修改 vX」，其余写「docs(changelog): vX」 */
+function commitMessage(mode, verTag) {
+  return (mode === 'overwrite' ? 'docs(changelog): 修改 v' : 'docs(changelog): v') + verTag;
+}
+
+/** 同版本号被幂等拦下时的提示（三条出路，与 Coze 逐字一致） */
+function duplicateMsg(verTag) {
+  return 'v' + verTag + ' 已经写过了，这次没有重复写入。'
+    + '（要修改它，有三种办法：① 传 overwrite=true 直接整块覆盖这个版本；'
+    + '② 先在页面撤回那一块再重发；③ 预览时改用新版本号。）';
+}
+
+/** 条目数与预览对不上时的提示 */
+function countMismatchMsg(expect, actual) {
+  return '未写入：条目数和预览对不上（预览 ' + expect + ' 条，这次 ' + actual + ' 条），请重新预览再确认';
+}
+
+/**
+ * 格式闸：items 必须是预览节点产出的定稿清单，每行「类别|模块|标题|描述」四段。
+ * 若模型没照抄清单、而是把用户原文整行搬来，就没有竖线 —— 那种行会被 parseItems
+ * 兜底成"新特性 + 无模块 + 无描述"，页面表现为"全都挤在新特性、标题带句号、没有
+ * 蓝胶囊和描述行"。这是最难自查的错误，所以在解析前先拦住并说清原因。
+ * 文案与 Coze 写入节点逐字一致。
+ * @returns {{error?:string, lines?:string[]}}
+ */
+function gateItems(raw) {
+  const rawLines = String(raw || '').split(/\r?\n/)
+    .map(l => String(l).replace(/\s+/g, ' ').trim())
+    .filter(l => l && !/^(无|暂无|无变更|没有|n\/a|none|null|-+|——)$/i.test(l));
+
+  const noPipe = rawLines.filter(l => l.indexOf('|') === -1);
+  if (rawLines.length && noPipe.length === rawLines.length) {
+    return { error: '未写入：items 格式不对，看起来是把更新说明原文直接传了过来，不是预览产出的定稿清单。\n'
+      + '正确格式每行都是四段、用竖线分隔：类别|模块|标题|描述，例如：\n'
+      + '  特性更新|环境管理|job-env-manager 更新至 0.0.66|提升服务稳定性。\n'
+      + '请重新预览一次，把预览返回的 items 原样复制过来再确认。\n'
+      + '（这次收到的是："' + noPipe[0].slice(0, 40) + '…"）' };
+  }
+  if (noPipe.length) {
+    return { error: '未写入：items 里有 ' + noPipe.length + ' 行缺少竖线分隔，格式不统一，已拦下避免写坏页面。\n'
+      + '正确格式：类别|模块|标题|描述。问题行示例："' + noPipe[0].slice(0, 40) + '…"\n'
+      + '请重新预览，把返回的 items 整段原样复制过来。' };
+  }
+  return { lines: rawLines };
 }
 
 /**
@@ -181,7 +261,9 @@ function buildPreview(verTag, dateLabel, items) {
 }
 
 module.exports = {
-  CATS, ORDER, MAX_PER_CAT,
+  CATS, ORDER, MAX_PER_CAT, DEFAULT_PAGE_URL, VERSION_RE,
   esc, rich, clean, cleanDesc, isNone, splitLong, normCat, beijingNow,
+  viewUrlOf, verTagOf, wantOverwrite,
+  whereOf, successHead, commitMessage, duplicateMsg, countMismatchMsg, gateItems,
   parseItems, group, partsOf, buildBlock, buildPreview
 };

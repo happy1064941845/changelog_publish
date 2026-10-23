@@ -24,10 +24,10 @@ changelog-publish/
 │   ├── content-rules.md                  # 文案规则 + 预览版式 + 页面结构约定
 │   └── rollback-and-troubleshooting.md   # 回滚与排查手册
 ├── scripts/
-│   ├── lib.js                            # ★ 渲染规则唯一定义源（分类归一/拆分/版式）
+│   ├── lib.js                            # ★ 规则唯一定义源（分类归一/拆分/版式/提交规则/回执文案）
 │   ├── render.js                         # 纯渲染：清单 → 预览文本 + cl-ver 代码块（不碰文件）
 │   ├── write.js                          # 渲染 + 插入页面 + 提交（API / 本地双通道）
-│   └── parity-test.js                    # 双链路一致性回归：断言与 Coze 节点逐字一致
+│   └── parity-test.js                    # 三层一致性回归：黄金快照 + 与 Coze 预览/写入节点逐字一致
 └── assets/
     ├── changelog.config.json             # 配置模板，复制到你的项目根目录后改值
     └── coze-verify-node.js               # Coze 工作流「核对写入结果」节点参考实现
@@ -35,22 +35,28 @@ changelog-publish/
 
 ## 与 Coze 链路的一致性
 
-本 skill 的**预览文本**、**定稿清单**、**写进页面的版本块**，与「飞书 → Coze」工作流（预览节点 A / 写入节点 B）
-**逐字一致**。一致性由 `scripts/lib.js` 承载 —— 它是这套渲染规则的**唯一定义源**，逐字对齐：
+本 skill 的**预览文本**、**定稿清单**、**写进页面的版本块（样式）**，以及**写入侧的提交规则与回执文案**，
+与「飞书 → Coze」工作流（预览节点 A / 写入节点 B）**逐字一致**。一致性由 `scripts/lib.js` 承载 ——
+它是这套规则的**唯一定义源**，逐字对齐：
 
 - `coze-preview-node.js`（工作流 A 节点三：出预览）
 - `coze-commit-node.js`（工作流 B 节点三：写入 + 出清单）
 
-因此两条链路处理同一份更新说明，产出的预览、count、分类分布、页面 HTML 都相同。
-**改任何渲染规则（分类归一、拆段兜底、每类上限、版式）必须三处同步改**，然后跑回归确认：
+逐字对齐的清单一共四块：**解析/归一、预览版式、页面块样式、提交规则**（含格式闸、条数闸、幂等拦截、
+overwrite 整块覆盖、`where`/成功回执/commit message 文案、`view_url` 默认值）。
+
+因此两条链路处理同一份更新说明，产出的预览、count、分类分布、页面 HTML 与回执文案都相同。
+**改任何一条规则必须三处同步改**（`lib.js` + 两个 Coze 节点），然后跑回归确认：
 
 ```bash
 node scripts/parity-test.js
-# 需指定 Coze 节点所在目录时：
-# COZE_DIR="<含 coze-preview-node.js 的目录>" node scripts/parity-test.js
+# 需指定 Coze 节点所在目录时（会同时跑预览/写入两层实链路对比）：
+# COZE_DIR="<含 coze-preview-node.js / coze-commit-node.js 的目录>" node scripts/parity-test.js
 ```
 
-全 PASS 才算改完。只改一处 = 两条链路重新分裂。
+回归分三层：**① 黄金快照**（永远可跑）→ **② 预览实链路**（对比 `coze-preview-node.js`）→
+**③ 写入实链路**（同一张合成页 + 同一份入参，对比页面变更/`mode`/回执文案，覆盖「并入当月 /
+新建月份 / 幂等拦截 / 覆盖写入 / 条数闸」五种情形）。全 PASS 才算改完。只改一处 = 两条链路重新分裂。
 
 ## 依赖
 
@@ -101,6 +107,7 @@ node scripts/write.js <<'EOF'
   "config": "changelog.config.json",
   "version": "v1.8.0",
   "date": "2026-10-23",
+  "count": 1,
   "items": "特性更新|环境管理|自定义环境支持打包发布|完成的…"
 }
 EOF
@@ -108,6 +115,7 @@ EOF
 
 - `preview_only: true` → 只回 `preview`，**不碰任何文件**（给用户确认用）。
 - `dry_run: true` → 算好插入位置但不提交/不落盘。
+- `count` → 预览条数；带上它会启用**条数闸**（与 Coze 一致，对不上直接拒写，防静默漏条）。
 
 ## 幂等与覆盖
 

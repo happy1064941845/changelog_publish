@@ -39,13 +39,76 @@ function findCozePreview() {
 function loadCozePreview(p) {
   const src = fs.readFileSync(p, 'utf8');
   const vm = require('vm');
-  const ctx = {
-    module: {}, exports: {}, console, Date, JSON, Math, String, Number,
-    Array, Object, RegExp, isNaN, parseInt, parseFloat
-  };
-  vm.createContext(ctx);
+  const ctx = vmCtx();
   vm.runInContext(src + '\nthis.__cozeMain = main;', ctx, { filename: 'coze-preview-node.js' });
   return ctx.__cozeMain;
+}
+
+// 通用 vm 上下文：给 Coze 代码节点用（它们跑在沙箱里，没有 require）
+function vmCtx() {
+  const vm = require('vm');
+  const ctx = {
+    module: {}, exports: {}, console, Date, JSON, Math, String, Number,
+    Array, Object, RegExp, isNaN, parseInt, parseFloat,
+    Buffer, TextEncoder, TextDecoder, Uint8Array, btoa, atob
+  };
+  vm.createContext(ctx);
+  return ctx;
+}
+
+// ---------- 第 3 层：加载 Coze 写入节点 ----------
+function findCozeCommit() {
+  const cands = [];
+  if (process.env.COZE_DIR) cands.push(process.env.COZE_DIR);
+  cands.push(path.join(__dirname, '..', '..', 'ready'));
+  cands.push(path.join(__dirname, '..', 'assets'));
+  for (const d of cands) {
+    const p = path.join(d, 'coze-commit-node.js');
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function loadCozeCommit(p) {
+  const src = fs.readFileSync(p, 'utf8');
+  const vm = require('vm');
+  const ctx = vmCtx();
+  vm.runInContext(src + '\nthis.__cozeMain = main;', ctx, { filename: 'coze-commit-node.js' });
+  return ctx.__cozeMain;
+}
+
+// ---------- 合成一张最小文档站页（带锚点 / 月份分组 / 右侧导航）----------
+function buildPage(opts) {
+  opts = opts || {};
+  const months = opts.months || ['2026-09'];
+  const withRail = opts.withRail !== false;
+
+  const monthBlocks = months.map(function (ym) {
+    const y = String(Number(ym.slice(0, 4))), mo = String(Number(ym.slice(5, 7)));
+    const ver = (opts.versions && opts.versions[ym]) || [];
+    return '\n          <div class="cl-month" data-month="' + ym + '" id="cl-v' + ym + '">'
+      + '\n            <h3 class="cl-month-h">' + y + '年' + mo + '月</h3>'
+      + ver.map(function (v) {
+          return '\n            <div class="cl-ver" data-version="v' + v + '">'
+            + '\n              <div class="cl-month-date">' + ym + '-01 · v' + v + '</div>'
+            + '\n            </div>';
+        }).join('')
+      + '\n          </div>';
+  }).join('');
+
+  const rail = withRail
+    ? '<aside class="cl-rail">'
+      + months.map(function (ym) {
+          const y = String(Number(ym.slice(0, 4))), mo = String(Number(ym.slice(5, 7)));
+          return '\n          <a href="#changelog" data-target="cl-v' + ym + '">' + y + '年' + mo + '月</a>';
+        }).join('')
+      + '\n        </aside>'
+    : '<aside class="cl-rail"></aside>';
+
+  return '<!doctype html>\n<html><body>\n      ' + rail
+    + '\n      <main class="changelog" id="changelog">\n        <!-- CHANGELOG:START -->'
+    + monthBlocks
+    + '\n        <!-- CHANGELOG:END -->\n      </main>\n</body></html>';
 }
 
 // ---------- 用例 ----------
@@ -147,6 +210,41 @@ const CASES = [
   }
 ];
 
+// ---------- 第 3 层用例：写入链（skill write.js ↔ Coze coze-commit-node.js）----------
+// 每个用例给同样的页面 + 同样的入参，断言两边产出的「页面变更 / 回执文案 / put_body」逐字一致。
+const COMMIT_CASES = [
+  {
+    name: '写作 · 并入当月分组',
+    page: { months: ['2026-10'], versions: { '2026-10': ['1.8.0'] } },
+    version: '1.9.0', date: '2026-10-23',
+    items: '特性更新|环境管理|job-env-manager 更新至 0.0.66|提升服务稳定性。\nBug 修复|前端|修复置顶偶发报错|服务启动时自动创建所需目录。'
+  },
+  {
+    name: '写作 · 新建月份分组（含右侧导航补行）',
+    page: { months: ['2026-09'], versions: { '2026-09': ['1.7.0'] } },
+    version: '1.9.0', date: '2026-10-23',
+    items: '新特性|命令面板|支持拼音首字母唤起|输入首字母即可定位命令。'
+  },
+  {
+    name: '幂等拦截 · 同名版本未传 overwrite',
+    page: { months: ['2026-10'], versions: { '2026-10': ['1.9.0'] } },
+    version: '1.9.0', date: '2026-10-23',
+    items: '特性更新|环境管理|再改一次|不应写入。'
+  },
+  {
+    name: '覆盖写入 · overwrite=true（位置不变）',
+    page: { months: ['2026-10'], versions: { '2026-10': ['1.9.0'] } },
+    version: '1.9.0', date: '2026-10-23', overwrite: true,
+    items: '特性更新|环境管理|覆盖后的一版|位置保持不变。'
+  },
+  {
+    name: '条数闸 · count 与清单对不上',
+    page: { months: ['2026-10'], versions: { '2026-10': ['1.8.0'] } },
+    version: '1.9.0', date: '2026-10-23', count: 5,
+    items: '特性更新|环境管理|只有一条|条数故意对不上。'
+  }
+];
+
 // ---------- 工具 ----------
 function diffLines(a, b) {
   const la = String(a).split('\n'), lb = String(b).split('\n');
@@ -172,9 +270,15 @@ function itemsFromLib(items) {
 (async function main() {
   const cozePath = findCozePreview();
   const cozeMain = cozePath ? loadCozePreview(cozePath) : null;
+  const commitPath = findCozeCommit();
+  const cozeCommit = commitPath ? loadCozeCommit(commitPath) : null;
+  const write = require('./write.js');
+
+  function b64(s) { return Buffer.from(s, 'utf8').toString('base64'); }
 
   console.log('第 1 层 · 黄金快照（lib.js 行为基线）');
   console.log('第 2 层 · 实链路对比 ' + (cozePath ? '（' + cozePath + '）' : '（未找到 Coze 节点，跳过）'));
+  console.log('第 3 层 · 写入链对比 ' + (commitPath ? '（' + commitPath + '）' : '（未找到 Coze 写入节点，跳过）'));
 
   let pass = 0, fail = 0;
 
@@ -211,7 +315,69 @@ function itemsFromLib(items) {
     }
   }
 
-  console.log('\n' + (fail ? '✗ ' : '✓ ') + '一致性回归：' + pass + ' PASS / ' + fail + ' FAIL'
-    + (cozeMain ? '' : '（仅黄金快照层；Coze 实链路未参与）'));
+  // ================= 第 3 层：写入链对比 =================
+  if (cozeCommit) {
+    for (const c of COMMIT_CASES) {
+      const problems = [];
+      const verTag = String(c.version).replace(/^[vV]/, '');
+      const items = lib.parseItems(c.items);
+      const count = c.count;
+      const page = buildPage(c.page);
+
+      // ---- Coze 写入节点 ----
+      const cozeOut = await cozeCommit({
+        params: {
+          get_body: { sha: 'deadbeef', content: b64(page) },
+          version: 'v' + verTag,
+          date: c.date,
+          items: c.items,
+          count: count,
+          overwrite: c.overwrite
+        }
+      });
+
+      // ---- skill 写入路径（镜像 write.js main() + viaApi() 的判定与文案）----
+      let sk = { ok: true, msg: '', mode: '', next: '' };
+      if (!items.length) {
+        sk = { ok: false, msg: '未写入：没有解析到任何条目，请重新预览' };
+      } else if (Number(count) > 0 && items.length !== Number(count)) {
+        sk = { ok: false, msg: lib.countMismatchMsg(count, items.length) };
+      } else {
+        const r = write.insertBlock(page, verTag, c.date.slice(0, 10), items, c.overwrite);
+        if (r.error) {
+          sk = { ok: false, msg: r.error };
+        } else {
+          sk.ok = true;
+          sk.mode = r.mode;
+          sk.next = r.next;
+          sk.msg = lib.successHead(r.mode, verTag) + '，共 ' + items.length + ' 条（' + lib.partsOf(items) + '），'
+            + lib.whereOf(r.mode, r.y, r.mo, verTag) + '\n查看：' + lib.viewUrlOf(c.page_url);
+        }
+      }
+
+      if (sk.ok !== !!cozeOut.ok) problems.push('ok 不一致：skill ' + sk.ok + '，Coze ' + !!cozeOut.ok);
+      if (sk.msg !== cozeOut.msg) problems.push('回执文案不一致：\n' + diffLines(sk.msg, cozeOut.msg));
+
+      if (sk.ok && cozeOut.ok) {
+        const cozeNext = Buffer.from(JSON.parse(cozeOut.put_body).content, 'base64').toString('utf8');
+        if (sk.next !== cozeNext) problems.push('页面变更不一致：\n' + diffLines(sk.next, cozeNext));
+        if (sk.mode !== cozeOut.mode) problems.push('mode 不一致：skill ' + sk.mode + '，Coze ' + cozeOut.mode);
+        if (Buffer.byteLength(sk.next) !== cozeOut.size_after) problems.push('size_after 不一致');
+      }
+      if (!sk.ok && !cozeOut.ok && sk.msg !== cozeOut.msg) { /* 已在上面覆盖 */ }
+
+      if (problems.length) {
+        fail++;
+        console.log('✗ ' + c.name);
+        problems.forEach(p => console.log('  ' + p));
+      } else {
+        pass++;
+        console.log('✓ ' + c.name + '  （mode ' + (sk.mode || '—') + '）');
+      }
+    }
+  }
+
+  const layers = '（黄金快照' + (cozeMain ? ' + 预览实链路' : '') + (cozeCommit ? ' + 写入实链路' : '）');
+  console.log('\n' + (fail ? '✗ ' : '✓ ') + '一致性回归：' + pass + ' PASS / ' + fail + ' FAIL ' + layers);
   process.exit(fail ? 1 : 0);
 })();
