@@ -1,11 +1,11 @@
 {
-  "_说明": "更新日志发布配置。复制本文件到你的项目根目录，改成本仓库的真实值。没有 token 时走 local_file 本地通道。",
+  "_说明": "更新日志发布配置。发布只走 GitHub API（需 GITHUB_TOKEN）；本配置刻意不含 local_file，不修改本地仓库文件。",
 
   "repo": "huaweicloud/aievspace-operation-guide",
   "path": "AIDevspace.html",
   "branch": "main",
 
-  "local_file": "D:/AI Shell/operation-guide/AIDevspace.html",
+  "_local_说明": "团队约定不修改本地副本：发布一律经 GitHub API 提交，脚本不写入本地仓库文件。",
 
   "view_base": "https://huaweicloud.github.io/aievspace-operation-guide/AIDevspace.html#changelog",
 
